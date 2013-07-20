@@ -451,6 +451,10 @@ class struct_(istruct):
         self.rank = sum([sort_key(field) for field in self.fields])
         self.mutated = False
 
+@notconsing
+class datetime_(struct_):
+    pass
+
 #------------------------------------------------------------------------
 # High-level types
 #------------------------------------------------------------------------
@@ -697,6 +701,7 @@ class module(known_value): # TODO: remove
 unit = _NumbaType.unit
 _array = array_
 _struct = struct_
+_datetime = datetime_
 
 def from_numpy_dtype(np_dtype):
     """
@@ -732,4 +737,14 @@ def struct_(fields=(), name=None, readonly=False, packed=False, **kwargs):
         # fields = sort_types(kwargs)
         # fields = list(kwargs.iteritems())
 
-    return _struct(fields, name, readonly, packed)
+    return _struct(fields, name, readonly, packed)    return _struct(fields, name, readonly, packed)    return _struct(fields, name, readonly, packed)def datetime_(fields=(), name=None, readonly=False, packed=False, **kwargs):
+    "Create a mutable struct type"
+    if fields and kwargs:
+        raise TypeError("The struct must be either ordered or unordered")
+    elif kwargs:
+        import ctypes
+        fields = sorted(kwargs.iteritems(), key=sort_key, reverse=True)
+        # fields = sort_types(kwargs)
+        # fields = list(kwargs.iteritems())
+
+    return _datetime(fields, name, readonly, packed)

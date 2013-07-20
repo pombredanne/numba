@@ -1,4 +1,5 @@
 #include "generated_conversions.h"
+#include "datetime/np_datetime.c"
 
 /* Utilities copied from Cython/Utility/TypeConversion.c */
 
@@ -222,6 +223,14 @@ static NUMBA_INLINE Py_UNICODE __Numba_PyObject_AsPy_UNICODE(PyObject* x) {
     return (Py_UNICODE)ival;
 }
 
+static PyObject* primitive2pydatetime(long int year, int month, int day)
+{
+    PyObject *result = PyDate_FromDate(year, month, day);
+    Py_INCREF(result);
+    return result;
+}
+
+
 /* End copy from Cython/Utility/TypeConversion.c */
 /* --------------------------------------------- */
 
@@ -251,6 +260,7 @@ export_type_conversion(PyObject *module)
 
     EXPORT_FUNCTION(__Numba_PyIndex_AsSsize_t, module, error);
     EXPORT_FUNCTION(__Numba_PyInt_FromSize_t, module, error);
+    EXPORT_FUNCTION(primitive2pydatetime, module, error);
 
     return 0;
 error:

@@ -157,7 +157,9 @@ class ObjectCoercer(object):
     def convert_single(self, type, llvm_result, name=''):
         "Generate code to convert an LLVM value to a Python object"
         llvm_result, type = self.npy_intp_to_py_ssize_t(llvm_result, type)
-        if type.is_struct:
+        if type.is_datetime:
+            return self.convert_single_struct(llvm_result, type)
+        elif type.is_struct:
             return self.convert_single_struct(llvm_result, type)
         elif type.is_complex:
             # We have a Py_complex value, construct a Py_complex * temporary

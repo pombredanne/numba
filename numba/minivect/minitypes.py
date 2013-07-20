@@ -1127,6 +1127,9 @@ class struct(Type):
         ctype = self.to_ctypes()
         return getattr(ctype, field_name).offset
 
+class datetime(struct):
+    is_datetime = True
+
 def getsize(ctypes_name, default):
     try:
         return ctypes.sizeof(getattr(ctypes, ctypes_name))

@@ -40,6 +40,9 @@ class StructAttribute(ExprNode):
         fields = struct_type(self.struct_type).fields
         return fields.index((self.attr, self.attr_type))
 
+class DateTimeAttribute(StructAttribute):
+    pass
+
 class StructVariable(ExprNode):
     """
     Tells the type inferencer that the node is actually a valid struct that

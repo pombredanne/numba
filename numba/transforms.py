@@ -334,6 +334,16 @@ class ResolveCoercions(visitors.NumbaTransformer):
                     nodes.ComplexAttributeNode(complex_value, "real"),
                     nodes.ComplexAttributeNode(complex_value.clone, "imag")
                 ]
+            elif node_type.is_datetime:
+                datetime_value = nodes.CloneableNode(node.node)
+                args = [
+                    nodes.DateTimeAttributeNode(datetime_value, 'year'),
+                    nodes.DateTimeAttributeNode(datetime_value.clone, 'month'),
+                    nodes.DateTimeAttributeNode(datetime_value.clone, 'day')
+                ]
+                new_node = function_util.utility_call(
+                        self.context, self.llvm_module,
+                        "primitive2pydatetime", args=args)
             else:
                 raise error.NumbaError(
                     node, "Don't know how to coerce type %r to PyObject" %

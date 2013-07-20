@@ -71,7 +71,7 @@ import numba
 from numba.utils import is_builtin
 
 reserved = set(['bool', 'int', 'long', 'float', 'complex',
-                'string', 'struct', 'array']).__contains__
+                'string', 'struct', 'array', 'datetime']).__contains__
 
 def tyname(name):
     return name + "_" if reserved(name) else name
@@ -178,16 +178,16 @@ class TypeConverter(object):
         self.convert_para = partial(convert_para, domain, codomain)
         self.partypes = weakref.WeakKeyDictionary()
 
-    def convert(self, type):
+    def convert(self, typex):
         "Return an LLVM type for the given type."
-        if isinstance(type, (tuple, list)):
-            return tuple(map(self.convert, type))
-        elif not isinstance(type, Type):
-            return type
-        elif type.is_unit:
-            return self.convert_unit(type)
+        if isinstance(typex, (tuple, list)):
+            return tuple(map(self.convert, typex))
+        elif not isinstance(typex, Type):
+            return typex
+        elif typex.is_unit:
+            return self.convert_unit(typex)
         else:
-            return self.convert_parametrized(type)
+            return self.convert_parametrized(typex)
 
     def convert_parametrized(self, type):
         # if type in self.partypes: # TODO: Check for type mutability

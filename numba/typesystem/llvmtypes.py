@@ -58,6 +58,15 @@ def struct_(fields, name=None, readonly=False, packed=False):
 
     return struct([field_type for field_name, field_type in fields])
 
+def datetime_(fields, name=None, readonly=False, packed=False):
+    if packed:
+        struct = llvm.core.Type.packed_struct
+    else:
+        struct = llvm.core.Type.struct
+
+    return struct([field_type for field_name, field_type in fields])
+   
+
 # @consing
 def pointer(base_type):
     if base_type.kind == llvm.core.TYPE_VOID:
