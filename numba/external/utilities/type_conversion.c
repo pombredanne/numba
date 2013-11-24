@@ -1,5 +1,9 @@
 #include <Python.h>
+#include <numpy/ndarraytypes.h>
+#include <numpy/arrayscalars.h>
 #include "generated_conversions.h"
+#include "datetime/_datetime.h"
+#include "datetime/np_datetime_strings.h"
 
 /* Utilities copied from Cython/Utility/TypeConversion.c */
 
@@ -258,6 +262,259 @@ static NUMBA_INLINE Py_ssize_t __Numba_PyIndex_AsSsize_t(PyObject*);
 static NUMBA_INLINE PyObject * __Numba_PyInt_FromSize_t(size_t);
 static NUMBA_INLINE size_t __Numba_PyInt_AsSize_t(PyObject*);
 
+
+static int convert_datetime_str(char *datetime_string,
+    NUMBA_DATETIMEUNIT *out_bestunit, numba_datetimestruct *out_datetimestruct)
+{
+    npy_bool out_local;
+    npy_bool out_special;
+    numba_datetimestruct dummy;
+
+    if (out_datetimestruct == NULL) {
+        out_datetimestruct = &dummy;
+    }
+
+    if (datetime_string == NULL) {
+        PyErr_SetString(PyExc_ValueError,
+            "Invalid datetime string");
+        return -1;
+    }
+
+    if (parse_iso_8601_datetime(datetime_string, strlen(datetime_string), -1,
+            NPY_SAME_KIND_CASTING, out_datetimestruct, &out_local, out_bestunit,
+            &out_special) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static npy_int64 convert_datetime_str_to_timestamp(char *datetime_string)
+{
+    numba_datetimestruct temp;
+    npy_datetime output;
+    PyArray_DatetimeMetaData new_meta;
+    NUMBA_DATETIMEUNIT out_bestunit;
+
+    if (convert_datetime_str(datetime_string, &out_bestunit, &temp) < 0) {
+        return -1;
+    }
+#if NPY_API_VERSION > 6
+    new_meta.base = out_bestunit;
+#else
+    new_meta.base = NUMBA_FR_us;
+#endif
+    new_meta.num = 1;
+
+    if (convert_datetimestruct_to_datetime(&new_meta, &temp, &output) < 0) {
+        return -1;
+    }
+
+    return output;
+}
+
+static npy_int32 convert_datetime_str_to_units(char *datetime_string)
+{
+    NUMBA_DATETIMEUNIT out_bestunit;
+
+#if NPY_API_VERSION > 6
+    if (convert_datetime_str(datetime_string, &out_bestunit, NULL) < 0) {
+        return -1;
+    }
+#else
+    out_bestunit = NUMBA_FR_us;
+#endif
+
+    return out_bestunit;
+}
+
+static npy_int64 convert_numpy_datetime_to_timestamp(PyObject *numpy_datetime)
+{
+    return ((PyDatetimeScalarObject*)numpy_datetime)->obval;
+}
+
+static npy_int32 convert_numpy_datetime_to_units(PyObject *numpy_datetime)
+{
+    return ((PyDatetimeScalarObject*)numpy_datetime)->obmeta.base;
+}
+
+static npy_int64 convert_numpy_timedelta_to_diff(PyObject *numpy_timedelta)
+{
+    return ((PyDatetimeScalarObject*)numpy_timedelta)->obval;
+}
+
+static npy_int32 convert_numpy_timedelta_to_units(PyObject *numpy_timedelta)
+{
+    return ((PyDatetimeScalarObject*)numpy_timedelta)->obmeta.base;
+}
+
+static PyObject* create_numpy_datetime(
+    npy_int64 timestamp,
+    npy_int32 units,
+    PyDatetimeScalarObject *scalar)
+{
+    if (scalar == NULL) {
+        return NULL;
+    }
+
+    scalar->obval = timestamp;
+    scalar->obmeta.base = units;
+    scalar->obmeta.num = 1;
+    Py_INCREF(scalar);
+ 
+    return (PyObject*)scalar;
+}
+
+static PyObject* create_numpy_timedelta(
+    npy_timedelta timedelta,
+    NUMBA_DATETIMEUNIT units,
+    PyDatetimeScalarObject *scalar)
+{
+    if (scalar == NULL) {
+        return NULL;
+    }
+
+    scalar->obval = timedelta;
+    scalar->obmeta.base = units;
+    scalar->obmeta.num = 1;
+    Py_INCREF(scalar);
+ 
+    return (PyObject*)scalar;
+}
+
+#define GET_TARGET_UNIT(type1, type2) \
+static NUMBA_DATETIMEUNIT get_target_unit_for_##type1##_##type2( \
+    npy_int32 units1, \
+    npy_int32 units2) \
+{ \
+    PyArray_DatetimeMetaData meta1; \
+    PyArray_DatetimeMetaData meta2; \
+\
+    meta1.base = units1; \
+    meta1.num = 1; \
+\
+    meta2.base = units2; \
+    meta2.num = 1; \
+\
+    if (can_cast_##type1##64_metadata(&meta1, &meta2, NPY_SAFE_CASTING)) { \
+        return meta2.base; \
+    } \
+    else if (can_cast_##type2##64_metadata(&meta2, &meta1, NPY_SAFE_CASTING)) { \
+        return meta1.base; \
+    } \
+\
+    return NUMBA_FR_GENERIC; \
+}
+
+GET_TARGET_UNIT(datetime, datetime)
+GET_TARGET_UNIT(timedelta, timedelta)
+GET_TARGET_UNIT(datetime, timedelta)
+
+
+#define DATETIME_ARITHMETIC(type1, type2, op, op_name, ret_type) \
+static npy_##ret_type op_name##_##type1##_##type2( \
+    npy_##type1 type1##1, \
+    NUMBA_DATETIMEUNIT units1, \
+    npy_##type2 type2##2, \
+    NUMBA_DATETIMEUNIT units2, \
+    NUMBA_DATETIMEUNIT target_units) \
+{ \
+    PyArray_DatetimeMetaData src_meta; \
+    PyArray_DatetimeMetaData dst_meta; \
+    npy_##type1 operand1 = type1##1; \
+    npy_##type2 operand2 = type2##2; \
+\
+    if (units1 == units2 && units2 == target_units) { \
+        return operand1 op operand2; \
+    } \
+\
+    dst_meta.base = target_units; \
+    dst_meta.num = 1; \
+\
+    src_meta.base = units1; \
+    src_meta.num = 1; \
+    if (cast_##type1##_to_##type1(&src_meta, &dst_meta, type1##1, &operand1) < 0) { \
+        return -1; \
+    } \
+\
+    src_meta.base = units2; \
+    src_meta.num = 1; \
+    if (cast_##type2##_to_##type2(&src_meta, &dst_meta, type2##2, &operand2) < 0) { \
+        return -1; \
+    } \
+\
+    return operand1 op operand2; \
+}
+
+DATETIME_ARITHMETIC(datetime, datetime, -, sub, timedelta)
+DATETIME_ARITHMETIC(datetime, timedelta, -, sub, datetime)
+DATETIME_ARITHMETIC(datetime, timedelta, +, add, datetime)
+
+
+#define EXTRACT_DATETIME(unit_name, ret_type) \
+static ret_type extract_datetime_##unit_name(npy_datetime timestamp, \
+    NUMBA_DATETIMEUNIT units) \
+{ \
+    PyArray_DatetimeMetaData meta; \
+    numba_datetimestruct output; \
+\
+    meta.base = units; \
+    meta.num = 1; \
+\
+    memset(&output, 0, sizeof(numba_datetimestruct)); \
+\
+    if (convert_datetime_to_datetimestruct(&meta, timestamp, &output) < 0) { \
+        return -1; \
+    } \
+    return output.unit_name; \
+}
+
+EXTRACT_DATETIME(year, npy_int64)
+EXTRACT_DATETIME(month, npy_int32)
+EXTRACT_DATETIME(day, npy_int32)
+EXTRACT_DATETIME(hour, npy_int32)
+EXTRACT_DATETIME(min, npy_int32)
+EXTRACT_DATETIME(sec, npy_int32)
+
+static npy_int32 extract_timedelta_sec(npy_timedelta timedelta,
+    NUMBA_DATETIMEUNIT units)
+{
+    PyArray_DatetimeMetaData meta1;
+    PyArray_DatetimeMetaData meta2;
+    npy_timedelta output = 0;
+
+    memset(&meta1, 0, sizeof(PyArray_DatetimeMetaData));
+    meta1.base = units;
+    meta1.num = 1;
+
+    memset(&meta2, 0, sizeof(PyArray_DatetimeMetaData));
+    meta2.base = 7;
+    meta2.num = 1;
+
+    if (cast_timedelta_to_timedelta(&meta1, &meta2, timedelta, &output) < 0) {
+        return -1;
+    }
+
+    return output;
+}
+
+
+static npy_int32 convert_timedelta_units_str(char *units_str)
+{
+    if (units_str == NULL)
+        return NUMBA_FR_GENERIC;
+
+    return parse_datetime_unit_from_string(units_str, strlen(units_str), NULL);
+}
+
+static npy_int32 get_units_num(char *units_char)
+{
+    if (units_char == NULL)
+        return NUMBA_FR_GENERIC;
+
+    return parse_datetime_unit_from_string(units_char, 1, NULL);
+}
+
 static int
 export_type_conversion(PyObject *module)
 {
@@ -277,6 +534,35 @@ export_type_conversion(PyObject *module)
 
     EXPORT_FUNCTION(__Numba_PyInt_FromLongLong, module, error);
     EXPORT_FUNCTION(__Numba_PyInt_FromUnsignedLongLong, module, error);
+
+    EXPORT_FUNCTION(convert_datetime_str_to_timestamp, module, error);
+    EXPORT_FUNCTION(convert_datetime_str_to_units, module, error);
+    EXPORT_FUNCTION(convert_numpy_datetime_to_timestamp, module, error);
+    EXPORT_FUNCTION(convert_numpy_datetime_to_units, module, error);
+    EXPORT_FUNCTION(convert_numpy_timedelta_to_diff, module, error);
+    EXPORT_FUNCTION(convert_numpy_timedelta_to_units, module, error);
+
+    EXPORT_FUNCTION(create_numpy_datetime, module, error);
+    EXPORT_FUNCTION(create_numpy_timedelta, module, error);
+
+    EXPORT_FUNCTION(extract_datetime_year, module, error);
+    EXPORT_FUNCTION(extract_datetime_month, module, error);
+    EXPORT_FUNCTION(extract_datetime_day, module, error);
+    EXPORT_FUNCTION(extract_datetime_hour, module, error);
+    EXPORT_FUNCTION(extract_datetime_min, module, error);
+    EXPORT_FUNCTION(extract_datetime_sec, module, error);
+    EXPORT_FUNCTION(extract_timedelta_sec, module, error);
+
+    EXPORT_FUNCTION(get_target_unit_for_datetime_datetime, module, error);
+    EXPORT_FUNCTION(get_target_unit_for_timedelta_timedelta, module, error);
+    EXPORT_FUNCTION(get_target_unit_for_datetime_timedelta, module, error);
+
+    EXPORT_FUNCTION(sub_datetime_datetime, module, error);
+    EXPORT_FUNCTION(add_datetime_timedelta, module, error);
+    EXPORT_FUNCTION(sub_datetime_timedelta, module, error);
+
+    EXPORT_FUNCTION(convert_timedelta_units_str, module, error);
+    EXPORT_FUNCTION(get_units_num, module, error);
 
     return 0;
 error:

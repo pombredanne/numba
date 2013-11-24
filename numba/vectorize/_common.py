@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import print_function, division, absolute_import
 import numpy as np
+import llvm.core as lc
 
 import numba
 from numba import decorators
@@ -73,6 +74,9 @@ class CommonVectorizeFromFunc(object):
 
         fntype = lfunclist[0].type.pointee
         inct = len(fntype.args)
+        if fntype.return_type.kind == lc.TYPE_VOID:
+            # void return type means return value is passed as argument.
+            inct -= 1
         outct = 1
 
         datlist = [None] * len(lfunclist)
@@ -173,6 +177,7 @@ class GenericASTVectorize(object):
         Add a specialization to the vectorizer. Pass any keyword arguments
         to numba.jit().
         """
+        kwds['ctypes'] = True
         dec = decorators.jit(restype, argtypes, **kwds)
         numba_func = dec(self.pyfunc)
         self.args_restypes.append(list(numba_func.signature.args) +
