@@ -1,293 +1,187 @@
-# -*- coding: utf-8 -*-
+"""
+Contains function decorators and target_registry
+"""
 from __future__ import print_function, division, absolute_import
+import warnings
 
-from numba.exttypes.entrypoints import  (jit_extension_class,
-                                         autojit_extension_class,
-                                         autojit_class_wrapper)
+from . import config, sigutils
+from .errors import DeprecationError
+from .targets import registry
+from . import cuda
 
-__all__ = ['autojit', 'jit', 'export', 'exportmany']
+# -----------------------------------------------------------------------------
+# Decorators
 
-import types
-import logging
-import inspect
 
-from numba import *
-from numba import typesystem, numbawrapper
-from numba import  functions
-from numba.utils import  process_signature
-from numba.codegen import llvmwrapper
-from numba import environment
-import llvm.core as _lc
-from numba.wrapping import compiler
+def autojit(*args, **kws):
+    """Deprecated.
 
-logger = logging.getLogger(__name__)
-
-environment.NumbaEnvironment.get_environment().link_cbuilder_utilities()
-
-if PY3:
-    CLASS_TYPES = type
-else:
-    CLASS_TYPES = (type, types.ClassType)
-
-#------------------------------------------------------------------------
-# PyCC decorators
-#------------------------------------------------------------------------
-
-def _internal_export(env, function_signature, backend='ast', **kws):
-    def _iexport(func):
-        if backend == 'bytecode':
-            raise NotImplementedError(
-               'Bytecode translation has been removed for exported functions.')
-        else:
-            name = function_signature.name
-            llvm_module = _lc.Module.new('export_%s' % name)
-            if not hasattr(func, 'live_objects'):
-                func.live_objects = []
-            func._is_numba_func = True
-            func_ast = functions._get_ast(func)
-            # FIXME: Hacked "mangled_name" into the translation
-            # environment.  Should do something else.  See comment in
-            # codegen.translate.LLVMCodeGenerator.__init__().
-            with environment.TranslationContext(
-                    env, func, func_ast, function_signature,
-                    name=name, llvm_module=llvm_module,
-                    mangled_name=name,
-                    link=False, wrap=False,
-                    is_pycc=True) as func_env:
-                pipeline = env.get_pipeline()
-                func_ast.pipeline = pipeline
-                pipeline(func_ast, env)
-                exports_env = env.exports
-                exports_env.function_signature_map[name] = function_signature
-                exports_env.function_module_map[name] = llvm_module
-                if not exports_env.wrap_exports:
-                    exports_env.function_wrapper_map[name] = None
-                else:
-                    wrapper_tup = llvmwrapper.build_wrapper_module(env)
-                    exports_env.function_wrapper_map[name] = wrapper_tup
-        return func
-    return _iexport
-
-def export(signature, env_name=None, env=None, **kws):
+    Use jit instead.  Calls to jit internally.
     """
-    Construct a decorator that takes a function and exports one
+    warnings.warn("autojit is deprecated, use jit instead which now performs "
+                  "the same functionality", DeprecationWarning)
+    return jit(*args, **kws)
 
-    A signature is a string with
 
-    name ret_type(arg_type, argtype, ...)
+class DisableJitWrapper(object):
+    def __init__(self, py_func):
+        self.py_func = py_func
+
+    def __call__(self, *args, **kwargs):
+        return self.py_func(*args, **kwargs)
+
+_msg_deprecated_signature_arg = ("Deprecated keyword argument `{0}`. "
+                                 "Signatures should be passed as the first "
+                                 "positional argument.")
+
+def jit(signature_or_function=None, locals={}, target='cpu', cache=False, **options):
     """
-    if env is None:
-        env = environment.NumbaEnvironment.get_environment(env_name)
-    return _internal_export(env, process_signature(signature), **kws)
+    This decorator is used to compile a Python function into native code.
+    
+    Args
+    -----
+    signature:
+        The (optional) signature or list of signatures to be compiled.
+        If not passed, required signatures will be compiled when the
+        decorated function is called, depending on the argument values.
+        As a convenience, you can directly pass the function to be compiled
+        instead.
 
-def exportmany(signatures, env_name=None, env=None, **kws):
+    locals: dict
+        Mapping of local variable names to Numba types. Used to override the
+        types deduced by Numba's type inference engine.
+
+    targets: str
+        Specifies the target platform to compile for. Valid targets are cpu,
+        gpu, npyufunc, and cuda. Defaults to cpu.
+
+    targetoptions: 
+        For a cpu target, valid options are:
+            nopython: bool
+                Set to True to disable the use of PyObjects and Python API
+                calls. The default behavior is to allow the use of PyObjects
+                and Python API. Default value is False.
+
+            forceobj: bool
+                Set to True to force the use of PyObjects for every value.
+                Default value is False.
+
+            looplift: bool
+                Set to True to enable jitting loops in nopython mode while
+                leaving surrounding code in object mode. This allows functions
+                to allocate NumPy arrays and use Python objects, while the
+                tight loops in the function can still be compiled in nopython
+                mode. Any arrays that the tight loop uses should be created
+                before the loop is entered. Default value is True.
+
+    Returns
+    --------
+    A callable usable as a compiled function.  Actual compiling will be
+    done lazily if no explicit signatures are passed.
+
+    Examples
+    --------
+    The function can be used in the following ways:
+
+    1) jit(signatures, target='cpu', **targetoptions) -> jit(function)
+
+        Equivalent to:
+
+            d = dispatcher(function, targetoptions)
+            for signature in signatures:
+                d.compile(signature)
+
+        Create a dispatcher object for a python function.  Then, compile
+        the function with the given signature(s).
+
+        Example:
+
+            @jit("int32(int32, int32)")
+            def foo(x, y):
+                return x + y
+
+            @jit(["int32(int32, int32)", "float32(float32, float32)"])
+            def bar(x, y):
+                return x + y
+
+    2) jit(function, target='cpu', **targetoptions) -> dispatcher
+
+        Create a dispatcher function object that specializes at call site.
+
+        Examples:
+
+            @jit
+            def foo(x, y):
+                return x + y
+
+            @jit(target='cpu', nopython=True)
+            def bar(x, y):
+                return x + y
+
     """
-    A Decorator that exports many signatures for a single function
-    """
-    if env is None:
-        env = environment.NumbaEnvironment.get_environment(env_name)
-    def _export(func):
-        for signature in signatures:
-            tocall = _internal_export(env, process_signature(signature), **kws)
-            tocall(func)
-        return func
-    return _export
+    if 'argtypes' in options:
+        raise DeprecationError(_msg_deprecated_signature_arg.format('argtypes'))
+    if 'restype' in options:
+        raise DeprecationError(_msg_deprecated_signature_arg.format('restype'))
 
-#------------------------------------------------------------------------
-# Compilation Entry Points
-#------------------------------------------------------------------------
-
-# TODO: Redo this entire module
-
-def compile_function(env, func, argtypes, restype=None, func_ast=None, **kwds):
-    """
-    Compile a python function given the argument types. Compile only
-    if not compiled already, and only if it is registered to the function
-    cache.
-
-    Returns a triplet of (signature, llvm_func, python_callable)
-    `python_callable` is the wrapper function (NumbaFunction).
-    """
-    function_cache = env.specializations
-
-    # For NumbaFunction, we get the original python function.
-    func = getattr(func, 'py_func', func)
-
-    # get the compile flags
-    flags = None # stub
-
-    # Search in cache
-    result = function_cache.get_function(func, argtypes, flags)
-    if result is not None:
-        sig, lfunc, pycall = result
-        return sig, lfunc, pycall
-
-    # Compile the function
-    from numba import pipeline
-
-    compile_only = getattr(func, '_numba_compile_only', False)
-    kwds['compile_only'] = kwds.get('compile_only', compile_only)
-
-    assert kwds.get('llvm_module') is None, kwds.get('llvm_module')
-
-    func_env = pipeline.compile2(env, func, restype, argtypes, func_ast=func_ast, **kwds)
-
-    function_cache.register_specialization(func_env)
-    return (func_env.func_signature,
-            func_env.lfunc,
-            func_env.numba_wrapper_func)
-
-
-def _autojit(template_signature, target, nopython, env_name=None, env=None,
-             **flags):
-    if env is None:
-        env = environment.NumbaEnvironment.get_environment(env_name)
-
-    def _autojit_decorator(f):
-        """
-        Defines a numba function, that, when called, specializes on the input
-        types. Uses the AST translator backend. For the bytecode translator,
-        use @autojit.
-        """
-
-        if isinstance(f, CLASS_TYPES):
-            compiler_cls = compiler.ClassCompiler
-            wrapper = autojit_class_wrapper
-        else:
-            compiler_cls = compiler.FunctionCompiler
-            wrapper = autojit_wrappers[(target, 'ast')]
-
-        env.specializations.register(f)
-        cache = env.specializations.get_autojit_cache(f)
-
-        flags['target'] = target
-        compilerimpl = compiler_cls(env, f, nopython, flags, template_signature)
-        numba_func = wrapper(f, compilerimpl, cache)
-
-        return numba_func
-
-    return _autojit_decorator
-
-def autojit(template_signature=None, backend='ast', target='cpu',
-            nopython=False, locals=None, **kwargs):
-    """
-    Creates a function that dispatches to type-specialized LLVM
-    functions based on the input argument types.  If no specialized
-    function exists for a set of input argument types, the dispatcher
-    creates and caches a new specialized function at call time.
-    """
-    if template_signature and not isinstance(template_signature, typesystem.Type):
-        if callable(template_signature):
-            func = template_signature
-            return autojit(backend='ast', target=target,
-                           nopython=nopython, locals=locals, **kwargs)(func)
-        else:
-            raise Exception("The autojit decorator should be called: "
-                            "@autojit()")
-
-    if backend == 'bytecode':
-        return _not_implemented
+    # Handle signature
+    if signature_or_function is None:
+        # No signature, no function
+        pyfunc = None
+        sigs = None
+    elif isinstance(signature_or_function, list):
+        # A list of signatures is passed
+        pyfunc = None
+        sigs = signature_or_function
+    elif sigutils.is_signature(signature_or_function):
+        # A single signature is passed
+        pyfunc = None
+        sigs = [signature_or_function]
     else:
-        return _autojit(template_signature, target, nopython,
-                        locals=locals, **kwargs)
+        # A function is passed
+        pyfunc = signature_or_function
+        sigs = None
 
-def _jit(restype=None, argtypes=None, nopython=False,
-         _llvm_module=None, env_name=None, env=None, func_ast=None, **kwargs):
-    #print(ast.dump(func_ast))
-    if env is None:
-        env = environment.NumbaEnvironment.get_environment(env_name)
-    def _jit_decorator(func):
-        if isinstance(func, CLASS_TYPES):
-            cls = func
-            kwargs.update(env_name=env_name)
-            return jit_extension_class(cls, kwargs, env)
+    wrapper = _jit(sigs, locals=locals, target=target, cache=cache,
+                   targetoptions=options)
+    if pyfunc is not None:
+        return wrapper(pyfunc)
+    else:
+        return wrapper
 
-        argtys = argtypes
-        if argtys is None and restype:
-            assert restype.is_function
-            return_type = restype.return_type
-            argtys = restype.args
-        elif argtys is None:
-            assert func.__code__.co_argcount == 0, func
-            return_type = None
-            argtys = []
-        else:
-            return_type = restype
 
-        assert argtys is not None
-        env.specializations.register(func)
+def _jit(sigs, locals, target, cache, targetoptions):
+    dispatcher = registry.target_registry[target]
 
-        assert kwargs.get('llvm_module') is None # TODO link to user module
-        assert kwargs.get('llvm_ee') is None, "Engine should never be provided"
-        sig, lfunc, wrapper = compile_function(env, func, argtys,
-                                               restype=return_type,
-                                               nopython=nopython, func_ast=func_ast, **kwargs)
-        return numbawrapper.create_numba_wrapper(func, wrapper, sig, lfunc)
+    def wrapper(func):
+        if config.ENABLE_CUDASIM and target == 'cuda':
+            return cuda.jit(func)
+        if config.DISABLE_JIT and not target == 'npyufunc':
+            return DisableJitWrapper(func)
+        disp = dispatcher(py_func=func, locals=locals,
+                          targetoptions=targetoptions)
+        if cache:
+            disp.enable_caching()
+        if sigs is not None:
+            for sig in sigs:
+                disp.compile(sig)
+            disp.disable_compile()
+        return disp
 
-    return _jit_decorator
+    return wrapper
 
-def _not_implemented(*args, **kws):
-    raise NotImplementedError('Bytecode backend is no longer supported.')
 
-jit_targets = {
-    ('cpu', 'bytecode') : _not_implemented,
-    ('cpu', 'ast') : _jit,
-}
-
-autojit_wrappers = {
-    ('cpu', 'bytecode') : _not_implemented,
-    ('cpu', 'ast')      : numbawrapper.NumbaSpecializingWrapper,
-}
-
-def jit(restype=None, argtypes=None, backend='ast', target='cpu', nopython=False,
-        **kws):
+def njit(*args, **kws):
     """
-    Compile a function given the input and return types.
+    Equivalent to jit(nopython=True)
 
-    There are multiple ways to specify the type signature:
-
-    * Using the restype and argtypes arguments, passing Numba types.
-
-    * By constructing a Numba function type and passing that as the
-      first argument to the decorator.  You can create a function type
-      by calling an exisiting Numba type, which is the return type,
-      and the arguments to that call define the argument types.  For
-      example, ``f8(f8)`` would create a Numba function type that
-      takes a single double-precision floating point value argument,
-      and returns a double-precision floating point value.
-
-    * As above, but using a string instead of a constructed function
-      type.  Example: ``jit("f8(f8)")``.
-
-    If backend='bytecode' the bytecode translator is used, if
-    backend='ast' the AST translator is used.  By default, the AST
-    translator is used.  *Note that the bytecode translator is
-    deprecated as of the 0.3 release.*
+    See documentation for jit function/decorator for full description.
     """
-    kws.update(nopython=nopython, backend=backend)
-    if isinstance(restype, CLASS_TYPES):
-        cls = restype
-        env = kws.pop('env', None) or environment.NumbaEnvironment.get_environment(
-                                                         kws.get('env_name', None))
-        return jit_extension_class(cls, kws, env)
+    if 'nopython' in kws:
+        warnings.warn('nopython is set for njit and is ignored', RuntimeWarning)
+    if 'forceobj' in kws:
+        warnings.warn('forceobj is set for njit and is ignored', RuntimeWarning)
+    kws.update({'nopython': True})
+    return jit(*args, **kws)
 
-    # Called with f8(f8) syntax which returns a dictionary of argtypes and restype
-    if isinstance(restype, typesystem.function):
-        if argtypes is not None:
-            raise TypeError("Cannot use both calling syntax and argtypes keyword")
-        argtypes = restype.args
-        restype = restype.return_type
-    # Called with a string like 'f8(f8)'
-    elif isinstance(restype, str) and argtypes is None:
-        signature = process_signature(restype, kws.get('name', None))
-        name, restype, argtypes = (signature.name, signature.return_type,
-                                   signature.args)
-        if name is not None:
-            kws['func_name'] = name
-    if restype is not None:
-        kws['restype'] = restype
-    if argtypes is not None:
-        kws['argtypes'] = argtypes
-
-    return jit_targets[target, backend](**kws)
 

@@ -1,29 +1,35 @@
 # -*- coding: utf-8 -*-
 ### Copyright (2012) Continuum Analytics, Inc
 ### All Rights Reserved
-
 from __future__ import print_function, division, absolute_import
 
 import os
 import logging
 import subprocess
 import tempfile
+import sys
 
-from .compiler import Compiler, find_shared_ending, find_args, find_linker
+from .cc import CC
+from .compiler import ModuleCompiler
+from .platform import Toolchain, find_shared_ending, find_pyext_ending
+from . import decorators
 
 
-def get_ending(args):  
+def get_ending(args):
     if args.llvm:
         return ".bc"
-    if args.olibs:
+    elif args.olibs:
         return ".o"
+    elif args.python:
+        return find_pyext_ending()
     else:
         return find_shared_ending()
 
 
 def main(args=None):
     import argparse
-    parser = argparse.ArgumentParser(description="Compile Python modules to a single shared library")
+    parser = argparse.ArgumentParser(
+        description="DEPRECATED - Compile Python modules to a single shared library")
     parser.add_argument("inputs", nargs='+', help="Input file(s)")
     parser.add_argument("-o", nargs=1, dest="output",
                         help="Output file  (default is name of first input -- with new ending)")
@@ -34,8 +40,6 @@ def main(args=None):
     group.add_argument("--llvm", action="store_true",
                        help="Emit llvm instead of native code")
 
-    parser.add_argument("--linker", nargs=1, help="Path to linker (default is platform dependent)")
-    parser.add_argument("--linker-args", help="Arguments to pass to linker (be sure to use quotes)")
     parser.add_argument('--header', action="store_true",
                         help="Emit C header file with function signatures")
     parser.add_argument('--python', action='store_true',
@@ -50,6 +54,9 @@ def main(args=None):
     if args.debug:
         logger.setLevel(logging.DEBUG)
 
+    logger.warn("The 'pycc' script is DEPRECATED; "
+                "please use the numba.pycc.CC API instead")
+
     if args.output:
         args.output = args.output[0]
         output_base = os.path.split(args.output)[1]
@@ -60,8 +67,14 @@ def main(args=None):
         args.output = input_base + get_ending(args)
     logger.debug('args.output --> %s', args.output)
 
+    if args.header:
+        print('ERROR: pycc --header has been disabled in this release due to a known issue')
+        sys.exit(1)
+
     logger.debug('inputs --> %s', args.inputs)
-    compiler = Compiler(args.inputs, module_name=module_name)
+    decorators.process_input_files(args.inputs)
+
+    compiler = ModuleCompiler(decorators.export_registry, module_name=module_name)
     if args.llvm:
         logger.debug('emit llvm')
         compiler.write_llvm_bitcode(args.output, wrap=args.python)
@@ -71,12 +84,15 @@ def main(args=None):
     else:
         logger.debug('emit shared library')
         logger.debug('write to temporary object file %s', tempfile.gettempdir())
+
+        toolchain = Toolchain()
+        toolchain.debug = args.debug
         temp_obj = (tempfile.gettempdir() + os.sep +
                     os.path.basename(args.output) + '.o')
         compiler.write_native_object(temp_obj, wrap=args.python)
-        cmdargs = (find_linker(),) + find_args() + ('-o', args.output, temp_obj)
-        subprocess.check_call(cmdargs)
+        libraries = toolchain.get_python_libraries()
+        toolchain.link_shared(args.output, [temp_obj],
+                              toolchain.get_python_libraries(),
+                              toolchain.get_python_library_dirs(),
+                              export_symbols=compiler.dll_exports)
         os.remove(temp_obj)
-
-    if args.header:
-        compiler.emit_header(args.output)

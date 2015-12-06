@@ -1,9 +1,3 @@
-distribute
-nose
-meta
 numpy>=1.6
-cython
-llvmpy
-cffi
+llvmlite>=0.7
 argparse
-llvmmath

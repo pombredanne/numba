@@ -1,237 +1,184 @@
-# -*- coding: utf-8 -*-
-from __future__ import print_function, division, absolute_import
-import os
+try:
+    # Try to use setuptools so as to enable support of the special
+    # "Microsoft Visual C++ Compiler for Python 2.7" (http://aka.ms/vcpython27)
+    # for building under Windows.
+    # Note setuptools >= 6.0 is required for this.
+    from setuptools import setup, Extension
+except ImportError:
+    from distutils.core import setup, Extension
+
 import sys
-import shutil
-import subprocess
-from fnmatch import fnmatchcase
-from distutils.util import convert_path
-
-# Do not EVER use setuptools, it makes cythonization fail
-# Distribute fixes that
-from distutils.core import setup, Extension
-
+import os
 import numpy
-
-# import numba
-import gen_type_conversion
-
-from Cython.Distutils import build_ext
-from Cython.Distutils.extension import Extension as CythonExtension
-
-if sys.version_info[:2] < (2, 6):
-    raise Exception('numba requires Python 2.6 or greater.')
-
+import numpy.distutils.misc_util as np_misc
 import versioneer
 
-#------------------------------------------------------------------------
-# Setup constants and arguments
-#------------------------------------------------------------------------
-
+versioneer.VCS = 'git'
 versioneer.versionfile_source = 'numba/_version.py'
 versioneer.versionfile_build = 'numba/_version.py'
 versioneer.tag_prefix = ''
 versioneer.parentdir_prefix = 'numba-'
 
 cmdclass = versioneer.get_cmdclass()
-cmdclass['build_ext'] = build_ext
 
 setup_args = {
-    'long_description': open('README.md').read(),
+    'long_description': open('README.rst').read(),
 }
 
+GCCFLAGS = ["-std=c89", "-Wdeclaration-after-statement", "-Werror"]
 
-numba_root = os.path.dirname(os.path.abspath(__file__))
-deps_root = os.path.join(numba_root, 'deps')
-pyext_root = os.path.join(deps_root, 'pyextensibletype')
-pyext_dst = os.path.join(numba_root, "numba", "pyextensibletype")
-
-def get_include():
-    """Use numba.get_include() instead (make numba importable without
-    building it first)
-    """
-    return os.path.join(numba_root, "numba", "include")
-
-numba_include_dir = get_include()
-import llvmmath
-llvmmath_include_dir = llvmmath.__path__[0] + '/mathcode/private'
-
-#------------------------------------------------------------------------
-# Package finding
-#------------------------------------------------------------------------
-
-def find_packages(where='.', exclude=()):
-    out = []
-    stack=[(convert_path(where), '')]
-    while stack:
-        where, prefix = stack.pop(0)
-        for name in os.listdir(where):
-            fn = os.path.join(where,name)
-            if ('.' not in name and os.path.isdir(fn) and
-                os.path.isfile(os.path.join(fn, '__init__.py'))
-            ):
-                out.append(prefix+name)
-                stack.append((fn, prefix+name+'.'))
-
-    if sys.version_info[0] == 3:
-        exclude = exclude + ('*py2only*', )
-
-    for pat in list(exclude) + ['ez_setup', 'distribute_setup']:
-        out = [item for item in out if not fnmatchcase(item, pat)]
-
-    return out
-
-#------------------------------------------------------------------------
-# 2to3
-#------------------------------------------------------------------------
-
-def run_2to3():
-    import lib2to3.refactor
-    from distutils.command.build_py import build_py_2to3 as build_py
-    print("Installing 2to3 fixers")
-    # need to convert sources to Py3 on installation
-    fixes = 'dict imports imports2 unicode metaclass basestring reduce ' \
-            'xrange itertools itertools_imports long types exec execfile'.split()
-    fixes = ['lib2to3.fixes.fix_' + fix 
-             for fix in fixes]
-    build_py.fixer_names = fixes
-    cmdclass["build_py"] = build_py
-    # cmdclass["build"] = build_py
-
-    # Distribute options
-    # setup_args["use_2to3"] = True
-
-#------------------------------------------------------------------------
-# pyextensibletype
-#------------------------------------------------------------------------
-
-def cleanup_pyextensibletype():
-    if os.path.exists(pyext_dst):
-        shutil.rmtree(pyext_dst)
-
-def register_pyextensibletype():
-    with open(os.path.join(deps_root, '__init__.py'), 'w'):
-        pass
-    with open(os.path.join(pyext_root, '__init__.py'), 'w'):
-        pass
-
-    shutil.copytree(pyext_root, pyext_dst)
-
-    from deps.pyextensibletype import setupconfig
-    exts = setupconfig.get_extensions(pyext_dst, "numba.pyextensibletype")
-
-    return exts
-
-#------------------------------------------------------------------------
-# Generate code for build
-#------------------------------------------------------------------------
-
-build = set(sys.argv) & set(['build', 'build_ext', 'install', 
-                             'bdist_wininst'])
-cleanup_pyextensibletype()
-
-if build:
-    gen_type_conversion.run()
-    # TODO: Finish and release pyextensibletype
-    extensibletype_extensions = register_pyextensibletype()
+if os.environ.get("NUMBA_GCC_FLAGS"):
+    CFLAGS = GCCFLAGS
 else:
-    extensibletype_extensions = []
+    CFLAGS = []
 
-extensibletype_include = "numba/pyextensibletype/include"
 
-if sys.version_info[0] >= 3:
-    run_2to3()
+if sys.platform == 'darwin' and sys.version_info[:2] == (2, 6):
+    cpp_link_args = ['-lstdc++']
+else:
+    cpp_link_args = []
 
-#------------------------------------------------------------------------
-# setup
-#------------------------------------------------------------------------
 
-exclude_packages = (
-    '*deps*', 'numba.ir.normalized', 'numba.ir.untyped', 'numba.ir.typed',
-)
+install_name_tool_fixer = []
 
-setup(
-    name="numba",
-    version=versioneer.get_version(),
-    author="Continuum Analytics, Inc.",
-    author_email="numba-users@continuum.io",
-    url="http://numba.github.com",
-    license="BSD",
-    classifiers=[
-        "Development Status :: 2 - Pre-Alpha",
+if sys.platform == 'darwin':
+    install_name_tool_fixer += ['-headerpad_max_install_names']
+
+
+npymath_info = np_misc.get_info('npymath')
+
+ext_dynfunc = Extension(name='numba._dynfunc',
+                        sources=['numba/_dynfuncmod.c'],
+                        extra_compile_args=CFLAGS,
+                        depends=['numba/_pymodule.h',
+                                 'numba/_dynfunc.c'])
+
+ext_npymath_exports = Extension(name='numba._npymath_exports',
+                                sources=['numba/_npymath_exports.c'],
+                                include_dirs=npymath_info['include_dirs'],
+                                libraries=npymath_info['libraries'],
+                                library_dirs=npymath_info['library_dirs'],
+                                define_macros=npymath_info['define_macros'])
+
+
+ext_dispatcher = Extension(name="numba._dispatcher",
+                           include_dirs=[numpy.get_include()],
+                           sources=['numba/_dispatcher.c',
+                                    'numba/_typeof.c',
+                                    'numba/_hashtable.c',
+                                    'numba/_dispatcherimpl.cpp',
+                                    'numba/typeconv/typeconv.cpp'],
+                           depends=["numba/_pymodule.h",
+                                    "numba/_dispatcher.h",
+                                    "numba/_typeof.h",
+                                    "numba/_hashtable.h"],
+                           extra_link_args=cpp_link_args)
+
+ext_helperlib = Extension(name="numba._helperlib",
+                          include_dirs=[numpy.get_include()],
+                          sources=["numba/_helpermod.c", "numba/_math_c99.c"],
+                          extra_compile_args=CFLAGS,
+                          extra_link_args=install_name_tool_fixer,
+                          depends=["numba/_pymodule.h",
+                                   "numba/_math_c99.h",
+                                   "numba/_helperlib.c",
+                                   "numba/mathnames.inc"])
+
+ext_typeconv = Extension(name="numba.typeconv._typeconv",
+                         sources=["numba/typeconv/typeconv.cpp",
+                                  "numba/typeconv/_typeconv.cpp"],
+                         depends=["numba/_pymodule.h"],
+                         extra_link_args=cpp_link_args)
+
+ext_npyufunc_ufunc = Extension(name="numba.npyufunc._internal",
+                               sources=["numba/npyufunc/_internal.c"],
+                               include_dirs=[numpy.get_include()],
+                               depends=["numba/npyufunc/_ufunc.c",
+                                        "numba/npyufunc/_internal.h",
+                                        "numba/_pymodule.h"])
+
+ext_npyufunc_workqueue = Extension(
+    name='numba.npyufunc.workqueue',
+    sources=['numba/npyufunc/workqueue.c'],
+    depends=['numba/npyufunc/workqueue.h'])
+
+
+ext_mviewbuf = Extension(name='numba.mviewbuf',
+                         sources=['numba/mviewbuf.c'])
+
+ext_nrt_python = Extension(name='numba.runtime._nrt_python',
+                           sources=['numba/runtime/_nrt_pythonmod.c',
+                                    'numba/runtime/nrt.c'],
+                           depends=['numba/runtime/nrt.h',
+                                    'numba/_pymodule.h',
+                                    'numba/runtime/_nrt_python.c'],
+                           include_dirs=["numba"] + npymath_info['include_dirs'])
+
+ext_modules = [ext_dynfunc, ext_npymath_exports, ext_dispatcher,
+               ext_helperlib, ext_typeconv,
+               ext_npyufunc_ufunc, ext_npyufunc_workqueue, ext_mviewbuf,
+               ext_nrt_python]
+
+
+def find_packages(root_dir, root_name):
+    """
+    Recursively find packages in *root_dir*.
+    """
+    packages = []
+    def rec(path, pkg_name):
+        packages.append(pkg_name)
+        for fn in sorted(os.listdir(path)):
+            subpath = os.path.join(path, fn)
+            if os.path.exists(os.path.join(subpath, "__init__.py")):
+                subname = "%s.%s" % (pkg_name, fn)
+                rec(subpath, subname)
+    rec(root_dir, root_name)
+    return packages
+
+packages = find_packages("numba", "numba")
+
+
+install_requires = ['llvmlite', 'numpy']
+if sys.version_info < (3, 4):
+    install_requires.extend(['enum34', 'singledispatch'])
+if sys.version_info < (3, 3):
+    install_requires.append('funcsigs')
+
+setup(name='numba',
+      description="compiling Python code using LLVM",
+      version=versioneer.get_version(),
+
+      classifiers=[
+        "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",
+        "License :: OSI Approved :: BSD License",
         "Operating System :: OS Independent",
         "Programming Language :: Python",
-        # "Programming Language :: Python :: 2.6",
+        "Programming Language :: Python :: 2.6",
         "Programming Language :: Python :: 2.7",
-        # "Programming Language :: Python :: 3.2",
-        "Topic :: Utilities",
-    ],
-    description="compiling Python code using LLVM",
-    packages=find_packages(exclude=exclude_packages),
-    entry_points = {
-        'console_scripts': [
-            'pycc = numba.pycc:main',
-            ]
-    },
-    scripts=["bin/numba"],
-    package_data={
-        '': ['*.md'],
-        'numba.minivect': ['include/*'],
-        'numba.ir.generator.tests': ['*.asdl'],
-        'numba.asdl.common': ['*.asdl'],
-        'numba.asdl.py2_7': ['*.asdl'],
-        'numba.asdl.py3_2': ['*.asdl'],
-        'numba.asdl.py3_3': ['*.asdl'],
-        'numba.external.utilities': ['*.c', '*.h', 'datetime/*'],
-        'numba': ['*.c', '*.h', 'include/*', '*.pxd'],
-        'numba.vectorize': ['*.h'],
-        'numba.annotate': ['annotate_inline_template.html',
-                           'jquery-ui.min.css',
-                           'jquery.min.js',
-                           'jquery-ui.min.js'],
-    },
-    ext_modules=extensibletype_extensions + [
-        Extension(
-            name="numba.vectorize._internal",
-            sources=["numba/vectorize/_internal.c",
-                     "numba/vectorize/_ufunc.c",
-                     "numba/vectorize/_gufunc.c"],
-            include_dirs=[numpy.get_include(), "numba/minivect/include/"],
-            depends=["numba/vectorize/_internal.h",
-                     "numba/minivect/include/miniutils.h"]),
-
-        Extension(
-            name="numba.external.utilities.utilities",
-            sources=["numba/external/utilities/utilities.c",
-                     "numba/external/utilities/datetime/np_datetime.c",
-                     "numba/external/utilities/datetime/np_datetime_strings.c"],
-
-            include_dirs=[numba_include_dir, extensibletype_include,
-                          numpy.get_include(), llvmmath_include_dir],
-            depends=["numba/external/utilities/type_conversion.c",
-                     "numba/external/utilities/virtuallookup.c",
-                     "numba/external/utilities/generated_conversions.c",
-                     "numba/external/utilities/generated_conversions.h",
-                     "numba/external/utilities/cpyutils.c",
-                     "numba/external/utilities/exceptions.c"]),
-        CythonExtension(
-            name="numba.pyconsts",
-            sources=["numba/pyconsts.pyx"],
-            depends=["numba/_pyconsts.pxd"],
-            include_dirs=[numba_include_dir]),
-        CythonExtension(
-            name="numba.exttypes.extension_types",
-            sources=["numba/exttypes/extension_types.pyx"],
-            cython_gdb=True),
-        CythonExtension(
-            name="numba.numbawrapper",
-            sources=["numba/numbawrapper.pyx", "numba/numbafunction.c"],
-            depends=["numba/numbafunction.h"],
-            include_dirs=[numba_include_dir,
-                          numpy.get_include()],
-            cython_gdb=True),
-    ],
-    cmdclass=cmdclass,
-    **setup_args
-)
+        "Programming Language :: Python :: 3.3",
+        "Programming Language :: Python :: 3.4",
+        "Topic :: Software Development :: Compilers",
+      ],
+      package_data={
+        # HTML templates for type annotations
+        "numba.annotations": ["*.html"],
+        # Various test data
+        "numba.cuda.tests.cudadrv.data": ["*.ptx"],
+        "numba.hsa.tests.hsadrv": ["*.brig"],
+        "numba.tests": ["pycc_distutils_usecase/*.py"],
+        # Some C files are needed by pycc
+        "numba": ["*.c", "*.h"],
+        "numba.pycc": ["*.c", "*.h"],
+        "numba.runtime": ["*.c", "*.h"],
+      },
+      scripts=["numba/pycc/pycc", "bin/numba"],
+      author="Continuum Analytics, Inc.",
+      author_email="numba-users@continuum.io",
+      url="http://numba.github.com",
+      ext_modules=ext_modules,
+      packages=packages,
+      install_requires=install_requires,
+      license="BSD",
+      cmdclass=cmdclass,
+      **setup_args)

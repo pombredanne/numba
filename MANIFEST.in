@@ -1,5 +1,10 @@
-include *.md *.py *.txt *.asdl CHANGE_LOG AUTHORS
+include MANIFEST.in
+include README.rst setup.py runtests.py versioneer.py CHANGE_LOG AUTHORS LICENSE
+
+recursive-include numba *.c *.cpp *.h *.hpp *.inc
 recursive-include docs *.ipynb *.txt *.py Makefile *.rst
-recursive-include deps *
+recursive-include examples *.py
+
 prune docs/_build
 prune docs/gh-pages
+include numba/_version.py

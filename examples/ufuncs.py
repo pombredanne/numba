@@ -1,5 +1,6 @@
-from numba.vectorize import vectorize
-from numba import autojit, double, typedlist, jit
+#!/usr/bin/env python
+from numba import vectorize
+from numba import autojit, double, jit
 import math
 import numpy as np
 
@@ -8,7 +9,7 @@ def sinc(x):
     if x == 0:
         return 1.0
     else:
-        return math.sin(x*math.pi)/(x*math.pi)
+        return math.sin(x*math.pi) / (x*math.pi)
 
 @vectorize(['int8(int8,int8)',
             'int16(int16,int16)',
@@ -135,4 +136,6 @@ def j0(x):
     return p * SQ2OPI / math.sqrt(x)
 
 
-        
+x = np.arange(10000, dtype='i8')
+y = np.arange(10000, dtype='i8')
+print(sum(x, y))
